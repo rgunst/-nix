@@ -1,0 +1,148 @@
+#!/bin/ksh
+############################################################################
+#@(#) Naam: ad_get
+#@(#) Functie: geef de waarde voor 1 attribuut van een AD groep of AD user
+#@(#) Datum: 4-02-2008    
+#@(#) Auteur: R de Gunst
+#@(#) $Revision: 1126 $
+#@(#) $Date: 2009-10-21 09:30:37 +0200 (wo, 21 okt 2009) $
+#@(#) $Author: rgunst $
+############################################################################
+# SCRIPTS ONDERHOUDEN OP ROOD EN DAARNA DISTRIBUEREN. NIET DECENTRAAL AANPASSEN
+############################################################################
+
+###
+# Debugger
+###
+_DEBUG=""
+
+DEBUG() {
+ [ "$_DEBUG" == "on" ] &&  $@ || :
+}
+
+DEBUG set -x
+
+###
+# Hulp
+###
+usage () {
+  echo "\nUsage: `basename $0` CN attribute\n"
+  echo "Result    : Lijst van user attribute waardes.\n"
+  echo "CN        : De Common Name van een user of een group."
+  echo "            De CN moet tussen aanhalingstekens wanneer deze spaties bevat."
+  echo "attribute : De naam van het attribute waarvan de waarde word gevraagd."
+  exit
+}
+
+case $1 in
+-h )
+  usage
+  ;;
+esac
+
+###
+# Intialisatie
+###
+[ "$#" == "2" ] || usage
+COMMON_NAME="$1"
+ATTRIBUTE="$2"
+
+COMMON_NAME="$1"
+ATTRIBUTE="$2"
+HOST="xxx"
+BIND="DC=xxx,DC=xxx"
+USER="cn=xxx,ou=xxx,ou=xxx,dc=xxx,dc=xxx"
+PASSWORD="xxx"
+
+MEMBERS="/tmp/memberlist_$$"
+TEMP_FILE="/tmp/ad_get_$$"
+RESULT_FILE="/tmp/result_list_$$"
+ERROR_FILE="/tmp/result_list_error_$$"
+STACK="/tmp/stack_$$"
+touch $RESULT_FILE $MEMBERS $STACK $ERROR_FILE
+trap "cleanup" 0 1 2 3 15
+
+###
+# functions
+###
+
+cleanup()
+{
+  rm -f "${RESULT_FILE}" "${MEMBERS}" "${STACK}" "${ERROR_FILE}" "${TEMP_FILE}"
+  exit
+}
+
+parseCN () {
+  # Extract all users from the given CN, with the value of the attribute.
+  # User is skipped if attribute value is empty.
+  DEBUG echo "\n- parseCN($@)"
+  echo "$1" > $MEMBERS
+  while [ -s $MEMBERS ]
+  do
+    OIFS=$IFS
+    IFS="
+"
+    for MEMBER in `cat $MEMBERS`
+    do
+      parseObject "$MEMBER"
+    done
+    if [ -s $STACK ]
+    then
+      mv $STACK $MEMBERS
+    else
+      rm $MEMBERS
+    fi
+  done
+  IFS=$OIFS
+}
+
+parseObject () {
+  DEBUG echo "\n- parseObject($@)"
+  IFS=$OIFS
+  OBJECT_CLASS=`getObjectClass "$1"`
+  DEBUG echo "\n-- ObjectClass = ${OBJECT_CLASS}"
+  case $OBJECT_CLASS in
+  group)
+    getMembers "$1"
+  ;;
+  user)
+    getAttribute "$1" "${ATTRIBUTE}"
+  ;;
+  esac
+}
+
+getMembers () {
+  DEBUG echo "\n- getMembers($@)"
+  # Place all members of a group, after cleanup, on the stack.
+  ldapsearch -F ': ' -h $HOST -b $BIND -D "$USER" -w $PASSWORD "($1)" member >${TEMP_FILE}
+  echo ''>>${TEMP_FILE}
+  cat ${TEMP_FILE} | \
+    sed '/^[^ ]/N;s/\n //g' | \
+    grep "member:" | \
+    sed 's/member: //' | \
+    awk -F',' '{print $1}' >>$STACK
+}
+
+getObjectClass () {
+  # Return the real (deepest) object class of the object.
+  RESULT=`ldapsearch -F ': ' -h $HOST -b $BIND -D "$USER" -w $PASSWORD "($1)" objectclass`
+  # Last field contains the object class.
+  echo $RESULT | awk '{print $NF}'
+}
+
+getAttribute () {
+  DEBUG echo "\n- getAttribute($@)"
+  # Return the deepest object class of the object.
+  RESULT=`ldapsearch -F ': ' -h $HOST -b $BIND -D "$USER" -w $PASSWORD "($1)" "${ATTRIBUTE}"`
+  # Generate friendly name.
+  NAME=`echo $1|awk -F'=' '{print $2": "}'`
+  # Send {name}: {attribute_value}
+  echo $RESULT |grep "${ATTRIBUTE}"| awk '{print "'"$NAME"'" $NF}'>>$RESULT_FILE
+}
+
+###
+# main routine
+###
+parseCN "cn=${COMMON_NAME}"
+cat $RESULT_FILE
+cleanup

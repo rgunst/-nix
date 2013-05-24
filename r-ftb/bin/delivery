@@ -1,0 +1,528 @@
+#!/bin/ksh
+################################################################################
+#@(#) Naam:      delivery
+#@(#) Functie:   transporteerd interface berichten tussen interfaces 
+#@(#) Datum:     13 januari 2004
+#@(#) Auteur:    Ronald de Gunst
+#@(#) $Revision: 1.24 $
+#@(#) $Date: 2007/02/05 11:13:21GMT+01:00 $
+#@(#) Modified: 
+################################################################################
+# SCRIPTS ONDERHOUDEN OP ROOD EN DAARNA DISTRIBUEREN. NIET DECENTRAAL AANPASSEN
+################################################################################
+
+###
+# Init
+###
+
+export BIN=/opt/beheer/scripts
+export THISHOST=`hostname`
+export BASE=`basename $0`
+unset _DEBUG
+
+if [ $# -eq 3 ] || [ $# -eq 4 ]
+then
+  export L_APPLA=$1
+  export L_DIR=$2
+  export L_APPLB=$3
+  if [ $4 == -d ]
+  then
+    export _DEBUG=on
+    echo "debug=on"
+  fi
+else
+  echo "Usage: $BASE {afzender} to {bestemming} [d]"
+  exit
+fi
+shift $# ; . $BIN/setglobal common ssh ; shift $#
+export L_BIN=$INTF/$L_APPLA/$L_DIR/$L_APPLB/bin
+export L_WORK=$INTF/$L_APPLA/$L_DIR/$L_APPLB/work
+export L_DONE=$INTF/$L_APPLA/$L_DIR/$L_APPLB/done
+export CENTRAL_DELIVERY_LOG=$ILOG/CENTRAL_DELIVERY_LOG
+export DELIVERY_LOG=$INTF/$L_APPLA/$L_DIR/$L_APPLB/log/delivery_log
+export DATACOM_ERROR_FLAG="${INTF}/tmp/${L_APPLA}_${L_DIR}_${L_APPLB}_delivery_error"
+
+###
+# Debugger
+###
+
+DEBUG() {
+ [ "${_DEBUG}" == "on" ]
+}
+
+DEBUG && export DEBUG_LOG=$INTF/$L_APPLA/$L_DIR/$L_APPLB/log/debug_log
+DEBUG && set -x
+DEBUG && exec >> ${DELIVERY_LOG} 2>&1
+
+on_trap()
+{
+  rm $FILE_LIST
+  echo "`date '+%d-%m-%Y %H:%M:%S'`: stop delivery proces voor $L_APPLA aan $L_APPLB" >>$CENTRAL_DELIVERY_LOG
+  exit 
+}
+
+# De on_* functies zijn callbacks om flexibiliteit te realiseren met behoud van loosely coupling
+# door dot-sourcing wordt de code 'geincluded' zodat variabelen uitgewisseld kunnen worden.
+
+# Voor elke batch in een loop voor verwerking
+on_before_batch ()
+{
+  if [ -f $L_BIN/before_delivery_batch_proces.sh ]
+  then
+    if [ $FIRST_BATCH ]
+    then
+      echo "`date '+%d-%m-%Y %H:%M:%S'`: INFO uitvoeren van before_delivery_batch_proces.sh"
+    fi
+    ( . $L_BIN/before_delivery_batch_proces.sh )
+    parse_vars
+  fi  
+}
+
+# Voor elke batch in een loop na verwerking
+on_after_batch ()
+{
+  if [ -f $L_BIN/after_delivery_batch_proces.sh ]
+  then
+    if [ $FIRST_BATCH ]
+    then
+      echo "`date '+%d-%m-%Y %H:%M:%S'`: INFO uitvoeren van after_delivery_batch_proces.sh"
+    fi
+    ( . $L_BIN/after_delivery_batch_proces.sh )
+    parse_vars
+  fi
+}
+
+# Voor elke file in een batch voor verwerking
+on_before_file ()
+{
+  if [ -f $L_BIN/before_delivery_file_proces.sh ]
+  then
+    if [ $FIRST_FILE ]
+    then
+      echo "`date '+%d-%m-%Y %H:%M:%S'`: INFO uitvoeren van before_delivery_file_proces.sh voor elke file."
+    fi
+    ( . $L_BIN/before_delivery_file_proces.sh )
+    parse_vars
+  fi  
+}
+
+# Voor elke file in een batch na verwerking
+on_after_file ()
+{
+  if [ -f $L_BIN/after_delivery_file_proces.sh ]
+  then
+    if [ $FIRST_FILE ]
+    then
+      echo "`date '+%d-%m-%Y %H:%M:%S'`: INFO uitvoeren van after_delivery_file_proces.sh voor elke file."
+    fi
+    ( . $L_BIN/after_delivery_file_proces.sh )
+    parse_vars
+  fi
+}
+
+parse_vars () {
+  DEBUG && set -x
+  # Variabelen worden eventueel door de callbacks aangemaakt in het bestand delivery_vars.
+  # vb BATCH_DIR:project1
+  if [ -f $L_BIN/delivery_vars ]
+  then
+    OIFS="$IFS"
+    IFS="
+"
+    for var_setting in `cat $L_BIN/delivery_vars`
+    do
+      var=`echo $var_setting | awk -F":" '{print $1}'`
+      value=`echo $var_setting | awk -F":" '{print $2}'`
+      eval $var=\"$value\"
+    done
+    IFS="$OIFS"
+    rm -f $L_BIN/delivery_vars
+  fi
+}
+ 
+deliver ()
+{
+  DEBUG && set -x
+  # zoek de zip bestanden
+  FILES=`cat $FILE_LIST|grep -v .zip|sort`
+  L_DNAME=zip.$$
+  case "$L_APPLA$L_APPLB" in
+    cobraechecknet)  L_DNAME="mis_`date +%Y%m%d%H%M`"
+            ;;
+    cobrapchecknet)  L_DNAME="pro_`date +%Y%m%d%H%M`"
+            ;;
+  esac
+  # maak de zip file aan
+  zip -jX $TMP/$L_DNAME $FILES
+  # test de integriteit van het zip bestand
+  if unzip -t $TMP/$L_DNAME.zip >/dev/null 2>&1
+  then
+    # wanneer ok, verwijder dan de originele bestanden
+    rm $FILES
+    # verplaats de zip file naar de outbox
+    if ! mv $TMP/$L_DNAME.zip $LOCAL_OUTBOX
+    then
+      # dit klopt niet!
+      rm $TMP/$L_DNAME.zip 2>/dev/null
+      echo "`date '+%d-%m-%Y %H:%M:%S'`: Zip fout $FILES" >>$DELIVERY_LOG
+      return 1
+    fi
+  else
+    echo "`date '+%d-%m-%Y %H:%M:%S'`: Zip fout $FILES" >>$DELIVERY_LOG
+    return 1
+  fi
+  # plaats de zip file op de lijst
+  ls -tr|grep .zip >$FILE_LIST
+  return 0
+}
+
+config ()
+{
+  DEBUG && set -x
+  L_APPLA=$1
+  L_APPLB=$2
+  OIFS=$IFS
+  IFS=":
+"
+  set -- `grep "^$L_APPLA:to:$L_APPLB:.*:$THISHOST:$" $IHOME/etc/config`
+  IFS=$OIFS
+  PROXY=${4}
+  REMOTE_HOST=${5}
+  PROTOCOL=${6}
+  USER_NAME=${7}
+  PASSWORD=${8}
+  INTERVAL=${11:-600}
+  
+  if [ "$PROXY" = "to_proxy" ]
+  then
+    PROXY_INBOX=$INTF/$L_APPLA/to/$L_APPLB/inbox
+  fi
+
+  # Default aflever inbox is $APPLB/from/$APPLA/inbox. Moet er op een andere
+  # locatie worden afgeleverd dan is inbox: kolom 12 van $APPLB:from:$APPLA 
+  # regel in $IHOME/etc/config voor de betreffende bestemmingshost 
+  INBOX_FROM_CONFIG=`grep "^$L_APPLB:from:$L_APPLA:[^:]*:$THISHOST:" $IHOME/etc/config | cut -f12 -d:`
+  REMOTE_INBOX=${INBOX_FROM_CONFIG:-$PROXY_INBOX}
+  REMOTE_INBOX=${REMOTE_INBOX:-$INTF/$L_APPLB/from/$L_APPLA/inbox}
+  L_DUMP=${13}
+  LOCAL_OUTBOX=${14:-$INTF/$L_APPLA/to/$L_APPLB/outbox}
+  L_INEXT=${15}
+  FLAG_FILE=`grep "^$L_APPLB:from:$L_APPLA:[^:]*:$THISHOST:" $IHOME/etc/config | cut -f22 -d:`
+}
+
+datcom_ok ()
+{
+  if [ ${DATCOM} = ok ]
+  then
+    if [ -f ${DATACOM_ERROR_FLAG} ]
+    then
+      # Informeer indien datacommunicatie problemen weer zijn opgelost.
+      MESSAGE="E-FTB delivery problem resolved on interface ${L_APPLA}/${L_DIR}/${L_APPLB} for server ${THISHOST} to ${REMOTE_HOST}"
+      if [ ! "${THISHOST}" == "sienna" ]
+      then
+        [ $L_MONITOR = 1 ] && ${BIN}/notify -t standby -u standby -m "${MESSAGE}"
+      fi
+      #${BIN}/notify -t mail -u sos -m "${MESSAGE}"
+      rm ${DATACOM_ERROR_FLAG}
+    fi
+    echo "`date '+%d-%m-%Y %H:%M:%S'`: OK    $FILE $PROTOCOL naar $REMOTE_HOST:$REMOTE_INBOX/$BATCH_DIR"
+    echo "-----"
+    TS=`date +%Y%m%d%H%M%S`
+    mv ${LOCAL_OUTBOX}/${FILE} ${L_DONE}/${FILE}.${TS}
+  else
+    if [ ! -f ${DATACOM_ERROR_FLAG} ]
+    then
+      # Informeer indien er datacommunicatie problemen zijn.
+      MESSAGE="E-FTB delivery error for ${FILE} on interface ${L_APPLA}/${L_DIR}/${L_APPLB} for server ${THISHOST} to ${REMOTE_HOST}"
+      [ $L_MONITOR = 1 ] && ${BIN}/notify -t standby -u standby -m "${MESSAGE}"
+      LOG_SNIPPET=`tail -5 ${DELIVERY_LOG}`
+      #${BIN}/notify -t mail -u sos -m "${MESSAGE}\n${LOG_SNIPPET}"
+      touch ${DATACOM_ERROR_FLAG}
+    fi     
+    echo "`date '+%d-%m-%Y %H:%M:%S'`: ERROR datacommunicatie"
+    echo "-----"
+  fi
+}
+
+agent ()
+{
+  DEBUG && set -x
+  L_APPLA=$1
+  L_APPLB=$2
+  FIRST_LOOP=true
+  FIRST_BATCH=true
+  while :
+  do
+    if [ $FIRST_LOOP ]
+    then
+      unset FIRST_LOOP
+    else
+      sleep $INTERVAL
+    fi
+    # Per loop configuratie checken om wijzigingen direct in te lezen
+    config $L_APPLA $L_APPLB
+
+    # Alleen bereikbaarheid host controleren als remote protocol
+    # gedefinieerd is (anders locale copy)
+    if [ -z "$PROTOCOL" ]
+    then
+      if [ "$REMOTE_HOST" = "$THISHOST" ]
+      then
+        PROTOCOL=cp
+      else
+        PROTOCOL=rcp
+      fi
+    fi
+    
+    if [ ! -d $LOCAL_OUTBOX ] 
+    then
+      echo "`date '+%d-%m-%Y %H:%M:%S'`: ERROR outbox $LOCAL_OUTBOX niet aanwezig"
+      continue
+    fi
+    # negeer interrupt van appl stop
+    trap '' 0 1 2 3 15
+    on_before_batch
+    # activeer interrupt van appl stop
+    trap "on_trap" 0 1 2 3 15
+    cd $LOCAL_OUTBOX
+    # Maak een lijst met bestanden. (sorteer op naam als het bestand ${L_BIN}/sortbyname aanwezig is.)
+    # todo sorteervolgorde opnemen in het configuratiebestand /interface/etc/config
+    if [ -f ${L_BIN}/sortbyname ]
+    then
+      ls -1>$FILE_LIST
+    else
+      ls -1tr>$FILE_LIST
+    fi
+    
+    # Indien de lijst leeg is, nieuwe loop.
+    [ -s $FILE_LIST ] || continue
+    # ?
+    [ $L_DUMP ] && ( deliver || continue )
+    include_flag
+    FIRST_FILE="true"
+    DEBUG && cat $FILE_LIST
+    for FILE in `cat $FILE_LIST`
+    do
+      if [ ! -f $FILE ]
+      then
+        echo "`date '+%d-%m-%Y %H:%M:%S'`: WARNING $FILE is geen regulier bestand, of is niet meer aanwezig."
+        continue
+      fi
+      # Voorkom dat er een stop flag geplaatst word bij de ontvangende zijde.
+      if [ $FILE = "norun.lck" ]
+      then
+       rm $FILE
+       echo "`date '+%d-%m-%Y %H:%M:%S'`: WARNING $FILE is verwijderd daar dit geen regulier bestand is."
+       continue
+      fi
+      # negeer interrupt van appl stop
+      trap '' 0 1 2 3 15
+      on_before_file
+      # uitgangspunt: datacommunicatie is fout gelopen tenzij DATCOM = ok
+      DATCOM=error
+      case $PROTOCOL in
+        ftp)
+          # passive FTP
+          echo "Start session."
+          ftp -iv $REMOTE_HOST <<-EOF
+            passive
+            bin
+            cd $REMOTE_INBOX
+            mput $FILE
+            bye
+EOF
+            echo "End session.\n"
+          ;;
+
+        ftp-a)
+          # active FTP
+          echo "Start session."
+          ftp -iv $REMOTE_HOST <<-EOF
+            bin
+            cd $REMOTE_INBOX
+            mput $FILE
+            bye
+EOF
+            echo "End session.\n"
+          ;;
+
+        sftp)
+          if [ $USER_NAME ]
+          then
+            if [ $BATCH_DIR ]
+            then
+              if [ $FIRST_FILE ]
+              then
+                # Maak een directory voor deze batch aan, waarin de bestanden worden geplaatst.
+                echo "Start session."
+                echo "  create directory ${BATCH_DIR}"
+                [ $FIRST ]
+                sftp $USER_NAME@$REMOTE_HOST <<-EOF
+                  cd $REMOTE_INBOX
+                  mkdir $BATCH_DIR
+                  cd $BATCH_DIR
+                  bye
+EOF
+                [ $? -eq 0 ] && tail -5 ${DELIVERY_LOG} |grep -v "Couldn't" && DATCOM=ok
+                # Indien de directory niet is aangemaakt, breek dan deze sessie af.
+                [ ${DATCOM} = ok ] || ( datcom_ok; break )
+                # Plaats het bestand.
+                sftp $USER_NAME@$REMOTE_HOST <<-EOF
+                  cd $REMOTE_INBOX/$BATCH_DIR
+                  put $FILE.tmp
+                  rename $FILE.tmp $FILE
+                  ls $FILE
+                  bye
+EOF
+                [ $? -eq 0 ] && tail -5 ${DELIVERY_LOG} |grep -v "Couldn't" && DATCOM=ok
+                echo "End session.\n"
+              else
+                # Batch directory is al aangemaakt.
+                echo "Start session."
+                [ $FIRST ]
+                sftp $USER_NAME@$REMOTE_HOST <<-EOF
+                  cd $REMOTE_INBOX/$BATCH_DIR
+                  put $FILE.tmp
+                  rename $FILE.tmp $FILE
+                  ls $FILE
+                  bye
+EOF
+                [ $? -eq 0 ] && tail -5 ${DELIVERY_LOG} |grep -v "Couldn't" && DATCOM=ok
+                echo "End session.\n"
+              fi
+            else
+              echo "Start session."
+              sftp  $USER_NAME@$REMOTE_HOST <<-EOF
+                cd $REMOTE_INBOX
+                put $FILE.tmp
+                rename $FILE.tmp $FILE
+                ls $FILE
+                bye
+EOF
+              [ $? -eq 0 ] && tail -5 ${DELIVERY_LOG} |grep -v "Couldn't" && DATCOM=ok
+              echo "End session.\n"
+            fi
+          else
+            echo "Start session."
+            sftp $REMOTE_HOST <<-EOF
+              cd $REMOTE_INBOX
+              put $FILE.tmp
+              rename $FILE.tmp $FILE
+              ls $FILE
+              bye
+EOF
+            [ $? -eq 0 ] && tail -5 ${DELIVERY_LOG} |grep -v "Couldn't" && DATCOM=ok
+            echo "End session.\n"
+          fi        
+          ;;
+
+        rcp)
+          # remote copy
+          if [ $USER_NAME ]
+          then
+            rcp -p $FILE $USER_NAME@$REMOTE_HOST:$REMOTE_INBOX/$FILE && DATCOM=ok
+          else
+            rcp -p $FILE $REMOTE_HOST:$REMOTE_INBOX/$FILE && DATCOM=ok
+          fi
+          ;;
+
+        scp)
+          # secure copy
+          if [ $USER_NAME ]
+          then 
+            USER_STRING=${USER_NAME}@
+          fi
+          if [ ${REMOTE_HOST} = zwart ]
+          then
+            # Op zwart draait sharity welke na een herstart van platina01 bestanden in bepaalde situaties niet goed verwerkt.
+            # Hiervoor een extra controle.
+            scp -p $FILE $USER_STRING$REMOTE_HOST:$REMOTE_INBOX/$FILE >/dev/null && \
+            ssh $USER_STRING$REMOTE_HOST ls $REMOTE_INBOX/$FILE && \
+            DATCOM=ok
+          else
+            scp -p $FILE $USER_STRING$REMOTE_HOST:$REMOTE_INBOX/$FILE >/dev/null && DATCOM=ok
+          fi
+          ;;
+
+        http-post)
+          # transporteer via http-post het bestand met cURL en gebruik van de proxyserver
+          # Stel het afleverlokatie samen (url)
+          URL=http://${REMOTE_HOST}${REMOTE_INBOX}
+          # post het bestand en check de HTTP statuscode. ( 2xx is ok )
+          curl -s -w "HTTP status code: %{http_code}\n" -x xxxx -U xxx/xxx:xxx --data-binary @$FILE $URL | grep 'HTTP status code: 2[0-9][0-9]' && DATCOM=ok
+          ;;
+
+        sendmail)
+          # bulkmailer via mailx
+          DOMAIN="xxx"
+          # mail de berichten in het bestand
+          $IHOME/bin/bulkmailer $LOCAL_OUTBOX/$FILE $DOMAIN $DELIVERY_LOG && DATCOM=ok
+          ;;
+
+		nfs_cp)
+          DEBUG && set -x
+          SUM_ORIG=`sum $FILE | nawk '{print $1}'`
+          cp $FILE $REMOTE_INBOX/$FILE.new
+          chmod a+rw $REMOTE_INBOX/$FILE.new
+          SUM_NEW=`sum $REMOTE_INBOX/$FILE.new | nawk '{print $1}'`
+          if [ $SUM_ORIG = $SUM_NEW ]
+          then
+            mv $REMOTE_INBOX/$FILE.new $REMOTE_INBOX/$FILE && DATCOM=ok
+          else
+            DATCOM=error
+          fi
+          ;;
+          
+        *)
+          cp -p $FILE $REMOTE_INBOX/$FILE && DATCOM=ok
+          ;;
+      esac
+      
+      # ftp geeft geen exitcode dus log checken voor ftp
+      if [ ${PROTOCOL} = ftp ] || [ ${PROTOCOL} = ftp-a ]
+      then
+        # 226 is ftp result voor succesfull transfer
+        if tail -7 ${DELIVERY_LOG} | grep "^226" > /dev/null
+        then
+          DATCOM=ok
+        fi
+      fi
+      # Controleer of de communicatie goed verlopen is.
+      datcom_ok
+      unset FIRST_FILE
+      on_after_file
+      # activeer interrupt van appl stop
+      trap "on_trap" 0 1 2 3 15
+done
+    # negeer interrupt van appl stop
+    trap '' 0 1 2 3 15
+    on_after_batch
+    # activeer interrupt van appl stop
+    trap "on_trap" 0 1 2 3 15
+    unset FIRST_BATCH
+    rm -f ${FILE_LIST}
+  done
+}
+
+# Wanneer de ontvangende partij een vlagbestand na aflevering van bestanden wil
+# ontvangen, kan dit door de naam van de vlagfile op te nemen in de configuratie.
+# de naam van de vlagfile is positie 22 van de 2e regel. (from)
+include_flag () {
+  DEBUG && set -x
+  if [ ${FLAG_FILE} ]
+  then
+    # Wacht 5 seconden zodat het vlag-bestand een nieuwere time-stamp heeft
+	  sleep 5
+	  # Maak vlag aan.
+    touch "${LOCAL_OUTBOX}/${FLAG_FILE}"
+    # Plaats de naam voor de vlagfile op de lijst voor te verzenden bestanden.
+    echo "${FLAG_FILE}" >> ${FILE_LIST}
+  fi
+}
+     
+trap "on_trap" 0 1 2 3 15
+$BIN/roulate $DELIVERY_LOG 10
+echo "`date '+%d-%m-%Y %H:%M:%S'`: start delivery proces voor ${L_APPLA} aan ${L_APPLB}" >>${CENTRAL_DELIVERY_LOG}
+FILE_LIST=${TMP}/deliverylist_${L_APPLA}_${L_APPLB}_$$
+agent ${L_APPLA} ${L_APPLB} >>${DELIVERY_LOG} 2>&1
+rm $FILE_LIST

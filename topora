@@ -1,0 +1,166 @@
+#!/bin/ksh
+############################################################################
+#@(#) Functie: Overzicht van top 10 Oracle processen
+#@(#) Datum: 07-05-2007    
+#@(#) Auteur: R de Gunst
+#@(#) $Revision: 1.1 $
+#@(#) $Date: 2007/06/19 11:50:20GMT+02:00 $
+#@(#) $Author: mksenb $
+############################################################################
+
+unset interval
+
+###
+# hulp
+###
+
+case $1 in
+-h )
+  echo "\nUsage: `basename $0` [ -once ]"
+  echo "\ntopora is een tool op basis van top. Echter hierbij worden de processen"
+  echo "dieper geanalyseerd.\n"
+  echo "  -once Eenmaal uitvoeren.\n"
+  exit
+  ;;
+-once )
+  RUNONCE="1"
+  ;;
+-log )
+  interval=600
+  ;;
+esac
+
+###
+# intialisatie
+###
+
+export BIN=/opt/beheer/scripts
+export THISHOST=`hostname`
+export BASE=`basename $0`
+shift $# ; . $BIN/setglobal oracle ; shift $#
+
+# verwijder tijdelijke bestanden bij stoppen van script
+trap "rm -f /tmp/top_$$ /tmp/top_ora_$$ /tmp/topall_$$ /tmp/topall1_$$; exit" 0 1 2 3 15
+
+clear
+  [ -z $RUNONCE ] &&echo "topora: Analyse van de top 10 Oracle processen.\n"
+
+###
+# functions
+###
+
+# Haal de informatie uit de database.
+get_info () {
+  RESULT=`sqlplus -s $ORACLE_UID <<-EINDE 
+    set timi off pagesize 0 feedback 1000
+    /* Background processen */
+    select substr(s.username,1,15) "O-userid"
+         , s.machine
+         , s.module
+         , substr(p.program,1,15) "Program"
+      from v\\$session s
+         , v\\$process p
+      where p.addr = s.paddr
+        and s.type = 'BACKGROUND'
+        and p.spid ='\$PID'
+    union
+    select substr(s.username,1,15) "O-userid"
+         , s.machine
+         , s.module
+         , substr(nvl(s.program,p.program),1,15)
+      from v\\$session s           
+         , v\\$process p
+      where p.addr = s.paddr
+        and s.type ^= 'BACKGROUND'
+        and p.spid ='\$PID'
+    ;
+EINDE`
+}
+
+runner () {
+  [ ! -z $RUNONCE ] && echo `date '+%d-%m-%Y %H:%M:%S'` 
+  # Bepaal de zwaarste processen van de gebruiker oracle.
+  top -U oracle -d 2 -s 2 > /tmp/topall_$$
+  # Neem de eerste 23 regels.
+  sed -e '1,23d' /tmp/topall_$$ > /tmp/topall1_$$
+  # gebruike de eerste 5 regels als header
+  head -n 5 /tmp/topall1_$$ > /tmp/top_ora_$$
+  # Neem alle process regels
+  grep oracle /tmp/topall1_$$>/tmp/top_$$
+  echo "pid    belast tijd     sid       user       machine   commando        module">> /tmp/top_ora_$$
+  echo "------ ------ -------- --------- ---------- --------- --------------- ----------">> /tmp/top_ora_$$
+  OIFS=$IFS
+  IFS="
+"
+  for PROCES in `cat /tmp/top_$$`
+  do
+    RESULT=""
+    USER=""
+    CMD=""
+    MACHINE=""
+    MODULE=""
+    IFS=$OIFS
+    # Wat is de belasting van dit proces?
+    UTL=`echo $PROCES|awk '{print $10}'`
+    
+    # Hoe lang loopt dit proces al?
+    TIME=`echo $PROCES|awk '{print $9}'`
+    
+    # bepaal het proces-id
+    PID=`echo $PROCES|awk '{print $1}'`
+    
+    # bepaal de oracle-sid
+    SID=`ps -o args -p $PID|awk '{print $1}'|grep oracle|sed 's/^oracle//g'`
+    if [ -z $SID ]
+    then
+      SID=-
+    fi
+    
+    # zoek de uid voor de sid
+    export ORACLE_UID=`$BIN/setora uid $SID`
+    if [ -z $ORACLE_UID ]
+    then
+      SID=-
+      USER="internal"
+      MACHINE="-"
+      CMD=`ps -o args -p $PID|grep ora|cut -f1 -d" "`
+    fi
+    
+    # Haal de informatie uit Oracle.
+    if [ ! $SID = - ] && [ ! $ORACLE_UID = - ]
+    then
+      get_info
+      RESULT=`echo $RESULT|sed 's/ /:/'`
+      RESULT=`echo $RESULT|sed 's/ /:/'`
+      RESULT=`echo $RESULT|sed 's/ /:/'`
+      USER=`echo $RESULT|cut -f1 -d:`
+      MACHINE=`echo $RESULT|cut -f2 -d:|sed 's/ETAMGROEP[\]//'`
+      MODULE=`echo $RESULT|cut -f3 -d:`
+      CMD=`echo $RESULT|cut -f4 -d:|cut -f1 -d" "`
+    fi
+    
+    # schrijf de gegevens in een tijdelijk bestand.
+    printf "%5s %7s %8s %-9s %-10s %-9s %-15s %-10s\n" $PID $UTL $TIME $SID $USER $MACHINE "$CMD" $MODULE>>/tmp/top_ora_$$
+    OIFS=$IFS
+    IFS="
+"
+  done
+  clear
+    [ -z $RUNONCE ] && echo "topora: Analyse van de top 10 Oracle processen.\n"
+  cat /tmp/top_ora_$$
+    [ -z $RUNONCE ] && echo "\nctrl-c om topora te stoppen\n"
+  
+  rm /tmp/top_$$ /tmp/top_ora_$$
+  IFS=$OIFS
+}
+
+###
+# main routine
+###
+
+while true
+do
+  runner
+  [ ! -z $RUNONCE ] && exit
+  [ $interval ] && sleep $interval
+done

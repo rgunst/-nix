@@ -1,0 +1,144 @@
+#!/bin/ksh
+################################################################################
+#@(#) Naam:      intercleanup
+#@(#) Functie:   Schonen/archiveren omgeving 
+#@(#) Datum:     2 februari 2006
+#@(#) Auteur:    RGunst
+#@(#) $Revision: 2.3 $
+#@(#) $Date: 2007/05/21 13:49:58GMT+02:00 $
+#@(#) Modified:
+################################################################################
+# Dit script schoont de done, outbox/func_done en outbox/func_error directories van elke interface in /interface op basis
+# van de bewaartermijn voor de interface. ( bestand = /interface/etc/config )
+#
+
+unset _DEBUG
+
+###
+# hulp
+###
+
+case $1 in
+-h )
+  echo "\nUsage: `basename $0`"
+  echo "\n Dit script schoont de done, outbox/func_done en outbox/func_error directories van elke interface"
+  echo " op basis van de bewaartermijn welke is ingevult. ( bestand = /interface/etc/config )\n"
+  echo "`basename $0` -d voor debugging\n"
+  exit
+  ;;
+-d )
+  export _DEBUG=on
+  echo "debug=on"
+  ;;
+esac
+
+###
+# intialisatie
+###
+
+export BIN=/opt/beheer/scripts
+export THISHOST=`hostname`
+export BASE=`basename $0`
+export DATE=`date +%Y-%m-%d`
+
+shift $# ; . $BIN/setglobal common ; shift $#
+
+CLEANUPLOG=${ILOG}/intercleanup_log
+$BIN/roulate ${CLEANUPLOG} 10
+
+###
+# Debugger
+###
+
+DEBUG() {
+ [ "${_DEBUG}" == "on" ]
+}
+
+DEBUG && set -x
+DEBUG && exec >> ${CLEANUPLOG} 2>&1
+
+###
+# functions
+###
+
+cleanup ()
+{
+  DEBUG && set -x
+	case ${L_CLEANING} in
+	archive)
+		echo "Archiving interface ${L_APPLA} ${L_DIR} ${L_APPLB} op host ${THISHOST} (ZIP)." >>$CLEANUPLOG
+		zip -m ${L_CLNPATH}/${DATE}-${L_APPLA}-${L_DIR}-${L_APPLB}.zip `find ${L_CLNPATH} -type f -print | egrep -v .zip$`
+		;;
+	archive_7)		
+		if [ `find ${L_CLNPATH} -type f -print | egrep -v .zip$ | wc -l` -gt 0 ]
+		then 
+			echo "Archiving interface ${L_APPLA} ${L_DIR} ${L_APPLB} op host ${THISHOST} (ZIP)." >>$CLEANUPLOG
+			zip -m ${L_CLNPATH}/${DATE}-${L_APPLA}-${L_DIR}-${L_APPLB}.zip `find ${L_CLNPATH} -type f -print | egrep -v .zip$`
+			echo "Opschonen van interface ${L_APPLA} ${L_DIR} ${L_APPLB} ouder dan 7 op host ${THISHOST}." >>$CLEANUPLOG
+			find ${L_CLNPATH} -type f -mtime +7 -print | xargs -i rm {} 2>/dev/null
+		fi
+		;;	
+	letitbe)
+		echo "Geen bestanden weggooien interface ${L_APPLA} ${L_DIR} ${L_APPLB} op host ${THISHOST}." >>$CLEANUPLOG
+		;;
+	*[0-9]*)
+		echo "Opschonen van interface ${L_APPLA} ${L_DIR} ${L_APPLB} ouder dan ${L_CLEANING} op host ${THISHOST}." >>$CLEANUPLOG
+		find ${L_CLNPATH} -type f -mtime +${L_CLEANING} -print | xargs -i rm {} 2>/dev/null
+		;;
+	nill)
+		echo "Er is geen cleanup variable ingevuld voor interface ${L_APPLA} ${L_DIR} ${L_APPLB} op host ${THISHOST}." >>$CLEANUPLOG
+		echo "`basename $0`: Fout met de interface op ${THISHOST}, geen cleanup variable in interface: ${L_APPLA} ${L_DIR} ${L_APPLB}!" | $BIN/sendemail "intercleanup" UNIX
+		;;
+	*)
+		echo "ERROR tijdens opschonen interface ${L_APPLA} ${L_DIR} ${L_APPLB} op host ${THISHOST}." >>$CLEANUPLOG
+		echo "`basename $0`: Fout tijdens opschonen interface ${L_APPLA} ${L_DIR} ${L_APPLB} op ${THISHOST}!" | $BIN/sendemail "intercleanup" UNIX
+		;;
+	esac
+}
+
+func_cleanup ()
+{
+  DEBUG && set -x
+  case ${L_FUNC_CLEANING} in
+	*[0-9]*)
+    echo "Opschonen van interface ${L_APPLA} ${L_DIR} ${L_APPLB} func_done ouder dan ${L_FUNC_CLEANING} op host ${THISHOST}." >>$CLEANUPLOG
+    find ${L_FUNC_DONE_CLNPATH} -type f -mtime +${L_FUNC_CLEANING} -print | xargs -i rm {} 2>/dev/null
+    echo "Opschonen van interface ${L_APPLA} ${L_DIR} ${L_APPLB} func_error ouder dan ${L_FUNC_CLEANING} op host ${THISHOST}." >>$CLEANUPLOG
+    find ${L_FUNC_ERROR_CLNPATH} -type f -mtime +${L_FUNC_CLEANING} -print | xargs -i rm {} 2>/dev/null
+    ;;
+  *)
+		echo "ERROR tijdens opschonen interface ${L_APPLA} ${L_DIR} ${L_APPLB} op host ${THISHOST}." >>$CLEANUPLOG
+		 echo "`basename $0`: Fout tijdens opschonen interface ${L_APPLA} ${L_DIR} ${L_APPLB} op ${THISHOST}!" | $BIN/sendemail "intercleanup" UNIX
+		;;
+	esac  
+}
+
+###
+# main routine
+###
+
+# Lees de configuratieregels welke actief zijn op deze server.
+for line in `grep ":${THISHOST}:$" ${IHOME}/etc/config | grep -v "^#"`
+do
+  OIFS=$IFS
+  IFS=":
+"
+  set -- $line
+  IFS=$OIFS
+
+  # Schoon op voor elke configuratieregel.
+	L_APPLA=${1}
+	L_DIR=${2}
+	L_APPLB=${3}
+	L_CLEANING=${18}
+	L_CLEANING=${L_CLEANING:-nill}
+	L_CLNPATH=${IHOME}/${L_APPLA}/${L_DIR}/${L_APPLB}/done
+	L_FUNC_CLEANING=${19:-nill}
+	cleanup
+	if [ "$L_DIR" = "from" ] && [ ! "$L_FUNC_CLEANING" = "nill" ]
+  then
+	  L_FUNC_DONE_CLNPATH=${IHOME}/${L_APPLA}/from/${L_APPLB}/outbox/func_done
+	  L_FUNC_ERROR_CLNPATH=${IHOME}/${L_APPLA}/from/${L_APPLB}/outbox/func_error
+	  func_cleanup
+  fi
+done

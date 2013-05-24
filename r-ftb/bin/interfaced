@@ -1,0 +1,346 @@
+#!/bin/ksh
+################################################################################
+#@(#) Naam:      interfaced
+#@(#) Functie:   Interface message broker 
+#@(#) Datum:     13 januari 2004
+#@(#) Auteur:    Ronald de Gunst
+#@(#) Copyright: Ronald de Gunst
+#@(#) $Revision: 1.14 $
+#@(#) $Date: 2006/10/27 11:30:35GMT+02:00 $
+#@(#) Modified:
+################################################################################
+# SCRIPTS ONDERHOUDEN OP ROOD EN DAARNA DISTRIBUEREN. NIET DECENTRAAL AANPASSEN
+################################################################################
+
+if [ "$1" = "-stop" ]
+then
+  shift
+  if [ $# -eq 3 ]
+  then
+    export L_APPLA=$1
+    export L_DIR=$2
+    export L_APPLB=$3
+    # zoek het pid voor van interface
+    pid = `ps -ef|grep "ksh /interface/bin/interfaced L_APPLA L_DIR L_APPLB$"|awk '{print $1}'`
+    # Stuur een kill
+    kill $pid
+    # zoek het eventuele sleep proces van de interface en kill deze.
+    ps -e|grep "^[ ]*$pid.*sleep$"|awk '{print $1}'|xargs -i kill {}
+  fi
+  exit
+fi
+
+###
+# Debugger
+###
+
+DEBUG() {
+ # Als in de bin directory van de interface een file genaamd debug aanwezig is,
+ # word gedetaileerde logging weggeschreven.
+ [ -f ${L_BIN}/debug ]
+}
+
+echo "`date '+%d-%m-%Y %H:%M:%S'`: interface $1 $2 $3 wordt gestart" >>/interface/log/interfaced_log
+
+export BIN=/opt/beheer/scripts
+export THISHOST=`hostname`
+export BASE=`basename $0`
+umask 000
+
+if [ $# -gt 2 ]
+then
+  export L_APPLA=$1
+  export L_DIR=$2
+  export L_APPLB=$3
+else
+  echo "Usage: $BASE {afzender} {from|to} {bestemming} [d]"
+  exit
+fi
+
+shift $# ; . $BIN/setglobal common ; shift $#
+. $INTF/bin/parse_e-ftb_config.sh ${L_APPLA} ${L_DIR} ${L_APPLB}
+
+$BIN/roulate $LOGFILE 10
+
+DEBUG && set -x
+DEBUG && exec >> ${LOGFILE} 2>&1
+
+on_trap ()
+{
+  echo "`date '+%d-%m-%Y %H:%M:%S'`: interface $L_APPLA $L_DIR $L_APPLB gestopt" >>$INTERLOG
+  rm -f $TMP/interfacedsum_${L_APPLA}_${L_DIR}_${L_APPLB}_[12]_$$ $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$ \
+    $TMP/interfacednew_${L_APPLA}_${L_DIR}_${L_APPLB}_$$ 2>/dev/null
+  exit 0
+}
+
+trap "on_trap" 1 2 3 15 16
+
+writelog ()
+{
+  echo "`date '+%d-%m-%Y %H:%M:%S'`: $*" >>$LOGFILE
+}
+
+control ()
+{
+  for DIR in $L_INBOX $L_OUTBOX $L_WORK $L_SAVE $L_DONE $L_ERROR $L_LOG
+  do
+    if [ ! -d $DIR ]
+    then
+      echo "`date '+%d-%m-%Y %H:%M:%S'`: Directory $DIR niet aanwezig [sleep 600]" >>$INTERLOG
+      # Controleer nogmaals na 5 minuten.
+      sleep 600
+      if [ ! -d $DIR ]
+      then
+        # Escaleer en stop interface.
+        echo "`date '+%d-%m-%Y %H:%M:%S'`: Directory $DIR niet aanwezig [exit]" >>$INTERLOG
+        MESSAGE="E-FTB Directory $DIR niet aanwezig. interface: ${L_APPLA}/${L_DIR}/${L_APPLB} server: ${THISHOST}. Interface wordt gestopt!"
+        [ $L_MONITOR = 1 ] && ${BIN}/notify -t standby -u standby -m "${MESSAGE}"
+        exit
+      fi
+    fi
+  done
+}
+
+# De on_* functies zijn callbacks om flexibiliteit te realiseren met behoud van loosely coupling
+# Door 'dot-sourcing' wordt de code 'ge-included' zodat variabelen uit het aanroepende script,
+# in de callbacks gebruikt kunnen worden.
+# Door aanroep in een subshell kunnen variabelen in de callback uitsluitend voor de scope
+# van de callback gewijzigd worden.
+# Variabelen welke door de callback aangemaakt of aangepast zijn worden via pars_vars weer ingelezen.
+
+# Voor elke batch in een loop voor verwerking
+on_before_batch ()
+{
+  if [ -f $L_BIN/before_interface_batch_proces.sh ]
+  then
+    if [ $FIRST_BATCH ]
+    then
+      writelog "INFO uitvoeren van before_interface_batch_proces.sh."
+    fi
+    ( . $L_BIN/before_interface_batch_proces.sh ) >> $LOGFILE
+    parse_vars
+  fi  
+}
+
+# Voor elke batch in een loop na verwerking
+on_after_batch ()
+{
+  if [ -f $L_BIN/after_interface_batch_proces.sh ]
+  then
+    if [ $FIRST_BATCH ]
+    then
+      writelog "INFO uitvoeren van after_interface_batch_proces.sh."
+    fi
+    ( . $L_BIN/after_interface_batch_proces.sh ) >> $LOGFILE
+    parse_vars
+  fi
+}
+
+# Voor elke file in een batch voor verwerking
+on_before_file ()
+{
+  if [ -f $L_BIN/before_interface_file_proces.sh ]
+  then
+    if [ $FIRST_FILE ]
+    then
+      writelog "INFO uitvoeren van before_interface_file_proces.sh voor elke file."
+    fi
+    ( . $L_BIN/before_interface_file_proces.sh ) >> $LOGFILE
+    parse_vars
+  fi  
+}
+
+# Voor elke file in een batch na verwerking
+on_after_file ()
+{
+  if [ -f $L_BIN/after_interface_file_proces.sh ]
+  then
+    if [ $FIRST_FILE ]
+    then
+      writelog "INFO uitvoeren van after_interface_file_proces.sh voor elke file."
+    fi
+    ( . $L_BIN/after_interface_file_proces.sh ) >> $LOGFILE
+    parse_vars
+  fi
+}
+
+parse_vars () {
+  # Variabelen worden eventueel door de callbacks aangemaakt in het bestand interface_vars.
+  # vb BATCH_DIR:project1
+  if [ -f $L_BIN/interface_vars ]
+  then
+    OIFS="$IFS"
+    IFS="
+"
+    for var_setting in `cat $L_BIN/interface_vars`
+    do
+      var=`echo $var_setting | awk -F":" '{print $1}'`
+      value=`echo $var_setting | awk -F":" '{print $2}'`
+      eval $var=\"$value\"
+    done
+    IFS="$OIFS"
+    rm -f $L_BIN/interface_vars
+  fi
+}
+
+changed ()
+{
+  if [ "$debug" = "debug" ]
+  then 
+    set -x
+  fi
+  on_before_batch
+  if [ $L_OKEXT ]
+  then
+    # Als er een OK-file is, dan worden alle bijbehorende berichten verwerkt
+    for FILE in `ls -dtr *$L_OKEXT 2>/dev/null`
+    do
+      FILENEW=`echo $FILE | sed "s/$L_OKEXT/$L_INEXT/g"`
+      if [ -f $FILENEW ]
+      then
+        echo $FILENEW
+      else
+        writelog "ERROR" "$FILE geen databericht" 
+      fi
+      rm -f $FILE
+    done >$TMP/interfacednew_${L_APPLA}_${L_DIR}_${L_APPLB}_$$
+  else
+    # Maak een lijst met de files in de inbox welke voldoen aan de extensie. (Geen directories.)
+    for FILE in `ls -dtr *$L_INEXT 2>/dev/null`
+    do
+      if [ -f $FILE ]
+      then
+        echo $FILE
+      fi
+    done >$TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$
+    [ -s $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$ ] || return
+    # Maak een lijst1 met een checksum van de bestanden uit de lijst.
+    sum `cat $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$` >$TMP/interfacedsum_${L_APPLA}_${L_DIR}_${L_APPLB}_1_$$
+    sleep 5
+    # Maak een lijst2 met een checksum van de bestanden uit de lijst.
+    sum `cat $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$` >$TMP/interfacedsum_${L_APPLA}_${L_DIR}_${L_APPLB}_2_$$
+    # Als de checksum van alle file niet zijn gewijzigd, ga dan verder.
+    cmp -s $TMP/interfacedsum_${L_APPLA}_${L_DIR}_${L_APPLB}_1_$$ $TMP/interfacedsum_${L_APPLA}_${L_DIR}_${L_APPLB}_2_$$ && return
+    sleep 5
+    # Elke file welke gewijzigd is, nu niet verwerken
+    for FILE in `cat $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$`
+    do
+      # Maak een lijst van de niet gewijzigde files.
+      grep "^`sum $FILE`$" $TMP/interfacedsum_${L_APPLA}_${L_DIR}_${L_APPLB}_2_$$ >/dev/null && echo $FILE
+    done >$TMP/interfacednew_${L_APPLA}_${L_DIR}_${L_APPLB}_$$
+  fi
+  mv $TMP/interfacednew_${L_APPLA}_${L_DIR}_${L_APPLB}_$$ $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$
+}
+
+echo "`date '+%d-%m-%Y %H:%M:%S'`: interface $L_APPLA $L_DIR $L_APPLB is gestart" >>$INTERLOG
+FIRST_BATCH="true"
+while :
+do
+  if [ "$debug" = "debug" ]
+  then 
+    set -x
+  fi
+#  OIFS=$IFS
+#  IFS=":
+#"
+
+
+  # Check of de benodigde directories bestaan
+  control
+  
+  # Zet interface on hold als norun.lck aanwezig is in de inbox
+  if [ -f $L_INBOX/norun.lck ]
+  then
+   writelog "WARN norun.lck aangetroffen in de inbox, interface on hold."
+   [ $L_MONITOR_NORUN = 1 ] && ${BIN}/notify -t standby -u standby -m "E-FTB norun.lck aangetroffen in de inbox, interface ${L_APPLA}_${L_DIR}_${L_APPLB} on hold."
+   while [ -f $L_INBOX/norun.lck ]
+   do
+     sleep $L_INVAL
+   done
+   writelog "WARN norun.lck niet meer aangetroffen in de inbox, interface off hold."
+   [ $L_MONITOR_NORUN = 1 ] && ${BIN}/notify -t standby -u standby -m "E-FTB norun.lck verwijderd uit de inbox, interface ${L_APPLA}_${L_DIR}_${L_APPLB} running."
+  fi
+  
+  cd $L_INBOX
+  
+  # Check of er nog bestanden worden gemuteerd
+  changed
+  FIRST_FILE="true"
+  for FILE in `cat $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$`
+  do
+    on_before_file
+    if echo $L_OPTIES | grep nodup >/dev/null
+    then 
+      if [ -f $L_OUTBOX/$FILE ]
+      then
+        writelog "WARN " "$FILE reeds in outbox, wordt niet verwerkt"
+        continue
+      fi
+    fi
+    FLAG=true
+    [ -s $FILE ] && FLAG=false
+    TS=`date +%Y%m%d%H%M%S`
+    # Bewaar orginele data. Als dit mislukt dan niet verwerken
+    if cp -p $FILE $L_SAVE/${FILE}.$TS 2>/dev/null
+    then
+      writelog "OK   " "$FILE -> $L_SAVE" 
+    else
+      writelog "ERROR" "$FILE -> $L_SAVE"
+      continue 
+    fi
+    if mv $FILE $L_WORK/$FILE
+    then
+      writelog "OK   " "$FILE -> $L_WORK"
+      on_after_file
+    else
+      writelog "ERROR" "$FILE -> $L_WORK"
+      continue
+    fi
+
+    # Als transformatie script gedefinieerd is, deze nu starten.
+    if [ $L_TRANS ]
+    then
+      writelog "trans   "    
+      eval $L_BIN/$L_TRANS $L_WORK/$FILE $L_WORK >$L_WORK/tmp_$FILE
+      mv $L_WORK/tmp_$FILE $L_WORK/$FILE
+    fi
+
+    if [ -s ${L_WORK}/${FILE} -o ${FLAG} = true ]
+    then
+      if cp -p ${L_WORK}/${FILE} ${L_OUTBOX}/${FILE} 2>/dev/null
+      then
+        # Indien L_DIR = to, dan wordt het kopieren naar de L_DONE directory verzorgd door het bijbehorende delivery proces.
+        if [ "${L_DIR}" = "to" ]
+        then
+          rm -f ${L_WORK}/${FILE}
+          rm -f ${L_SAVE}/${FILE}.${TS}
+        else
+          mv ${L_WORK}/${FILE} ${L_DONE}/${FILE}.${TS}
+          rm -f ${L_SAVE}/${FILE}.${TS}
+        fi
+        writelog "OK   " "${FILE} -> ${L_OUTBOX}"
+        continue
+      else
+        writelog "ERROR" "${FILE} -> ${L_OUTBOX}"
+        mv ${L_WORK}/${FILE} ${L_ERROR}/${FILE}
+        rm -f ${L_SAVE}/${FILE}.${TS}
+      fi
+    else
+      # Er is tijdens transformatie waarschijnlijk iets fout gegaan 
+      writelog ERROR $L_WORK/$FILE leeg na transformatie 
+      rm -f $L_WORK/$FILE
+    fi
+    # Met deze sleep krijgt elke file een unieke timestamp
+    sleep 1
+    unset FIRST_FILE
+  done
+  if echo $L_OPTIES | grep once >/dev/null
+  then
+    # Als interface eenmalig draait (once),
+    # pas stoppen als er berichten verwerkt zijn
+    [ -s $TMP/interfaced_${L_APPLA}_${L_DIR}_${L_APPLB}_$$ ] && break
+  fi
+  on_after_batch
+  unset FIRST_BATCH
+  sleep $L_INVAL
+done

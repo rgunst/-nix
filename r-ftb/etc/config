@@ -1,0 +1,75 @@
+################################################################################
+#@(#) Naam:      config
+#@(#) Functie:   configuratiefile voor interface
+#@(#) Datum:     Mon Aug 14 13:33:51 MEST 2003
+#@(#) Auteur:    RGunst
+#@(#) $Revision: 1.1.1.38 $
+#@(#) $Date: 2007/06/18 11:36:55GMT+02:00 $
+#@(#) Modified:
+################################################################################
+# SCRIPTS ONDERHOUDEN OP MKS - ROOD EN DAARNA DISTRIBUEREN. NIET DECENTRAAL AANPASSEN
+################################################################################
+#  Een interface bestaat uit een 'to' of een 'from' regel.
+#
+#  De 'to' regel bevat de volgende velden:
+#  1. bron applicatie
+#  2. to
+#  3. doel applicatie
+#  4. directorynaam van de inbox voor delivery indien via de proxy (sienna)
+#  5. naam van de server waarop de doelapplicatie draait
+#  6. transport methode voor het overzetten van het bestand [ftp,rcp,cp,http-post]
+#  7. eventueel een gebruikersnaam
+#  8. !NIET MEER IN GEBRUIK! Gebruik nu "/.netrc" wachtwoord voor de gebruikersnaam
+#  9. Transformatie script
+# 10. Interval in sec voor het oppakken van bestanden uit de inbox
+# 11. Interval in sec voor overzetten van bestanden
+# 12. directorynaam van de inbox indien de inbox niet kan voldoen aan de conventie
+# 13. Zip berichten en verwerk zip in de delivery script
+# 14. directorynaam van de outbox indien de outbox niet kan voldoen aan de conventie
+# 15. extensie van de te verwerken berichten (bv. .txt, alleen de berichten *.txt verwerken
+# 16. eventueel extensie van een flagbestand (bv. .ok) die aangeeft of bericht verwerkt kan worden
+# 17. Opties (nodup = geen duplicaten in outbox toegestaan, verwerking stopt
+#             once  = huidige bestanden overzetten en stoppen)
+# 18. Wordt gelezen door intercleanup script voor aantal dagen max bewaren 
+#             (standaard 14 dagen invullen..
+#              x = ouder dan x dagen verwijderen
+#              archive = zippen van done directory
+#              archive_7 = zippen van done directory, daarna bestanden (zip) ouder dan x dagen verwijderen
+#              letitbe = niet opschonen uitsluitend tijdelijk toegestaan)
+# 19. meldingen bij fouten. 1 = ja, 0 = nee
+# 20. meldingen bij norun.lck in de inbox. 1 = ja, 0 = nee
+# 21. naam van de server waarop de bronapplicatie draait
+#
+#  De 'from' regel bevat de volgende velden:
+#  1. doel applicatie
+#  2. from
+#  3. bron applicatie
+#  4. -
+#  5. naam van de server waarop de bronapplicatie draait
+#  6. -
+#  7. -
+#  8. -
+#  9. Transformatie script
+# 10. Interval in sec voor het oppakken van bestanden uit de inbox
+# 11. Interval in sec voor overzetten van bestanden
+# 12. directorynaam van de inbox indien de inbox niet kan voldoen aan de conventie
+# 13. -
+# 14. directorynaam van de outbox indien de outbox niet kan voldoen aan de conventie
+# 15. extensie van de te verwerken berichten (bv. .txt, alleen de berichten *.txt verwerken
+# 16. eventueel extensie van een flagbestand (bv. .ok) die aangeeft of bericht verwerkt kan worden
+# 17. Opties (nodup = geen duplicaten in outbox toegestaan, verwerking stopt
+#             once  = huidige bestanden overzetten en stoppen)
+# 18. Wordt gelezen door intercleanup script voor aantal dagen max bewaren 
+#             (standaard 14 dagen invullen..
+#              x = ouder dan x dagen verwijderen
+#              archive = zippen van done directory
+#              archive_7 = zippen van done directory, daarna bestanden (zip) ouder dan x dagen verwijderen
+#              letitbe = niet opschonen uitsluitend tijdelijk toegestaan)
+# 19. bewaartermijn (dagen) voor bestanden in de func_error en func_done directory
+# 20. wie te melden bij nieuwe bestanden in de func_error directory. (via notify)
+# 21. indien 21 is gevuld, 24*7 sms of tijdens werktijd email en tijdens standby sms
+# 22. Naam voor vlagbestand welke bij de ontvanger wordt geplaatst na aflevering van de bestanden.
+# 23. meldingen bij fouten. 1 = ja, 0 = nee
+# 24. meldingen bij norun.lck in de inbox. 1 = ja, 0 = nee
+# 25. naam van de server waarop de doelapplicatie draait
+

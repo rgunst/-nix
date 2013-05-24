@@ -1,0 +1,65 @@
+#!/bin/ksh
+################################################################################
+#@(#) Naam:      mailer($1, $2, $3)
+#@(#) Functie:   mailt berichten via interface 
+#@(#) Datum:     20 september 2006
+#@(#) Auteur:    Ronald de Gunst
+#@(#) $Revision: 1.3 $
+#@(#) $Date: 2006/09/22 16:06:13GMT+02:00 $
+#@(#) Modified: 
+################################################################################
+# SCRIPTS ONDERHOUDEN OP ROOD EN DAARNA DISTRIBUEREN. NIET DECENTRAAL AANPASSEN
+################################################################################
+# De volgende 3 parameters zijn verplicht
+# $1 = de te verwerken file
+# $2 = domeinnaam
+# $3 = logfile
+
+# zijn er 3 parameters ingevuld?
+#if [ $# == 3 ]
+#then
+#  exit 1
+#fi
+
+# Is de te verwerken file leesbaar?
+if [ ! -r "$1" ]
+then
+  echo "ERROR: De te verwerken file is niet leesbaar: $1"
+  exit 2
+fi
+
+# Is de logfile schrijfbaar?
+if [ ! -w "$3" ]
+then 
+  echo "ERROR: logfile niet is schrijfbaar: $3"
+  exit 4
+fi
+
+FILE=$1
+LOG_FILE=$3
+FILE_NAME=`echo $1|awk -F"/" '{print $NF}'`
+
+echo "`date` Start ververking van bestand $FILE_NAME">>$LOG_FILE
+
+# Start awk
+nawk -F":" -v KETEN=$2 -v LOGFILE=$3 '{
+  # Velden gescehiden door :, $1 = ontvanger, $2 = onderwerp, $3 = aanhef, $4 = inhoud, $5 = afsluiting
+  # extra regel in het bericht om replies te voorkomen.
+  COMMENT="Dit is een automatisch verzonden bericht waarop niet geantwoord kan worden."
+  # Stel het mailcommando samen
+  mail_cmd= "echo \""$3"\n\n"$4"\n\n"$5"\n\n\n"COMMENT"\"|mailx -r noreply@"KETEN" -s \""$2"\" "$1
+  # voer het mailcommando uit, en controleer het resultaat
+  if (system(mail_cmd) == 0) {
+    result= "succesvol"
+  }
+  else {
+    result= "NIET succesvol"
+  }
+  # Stel het resultaat op
+  logline = "echo \"  bericht "result" verzonden aan "$1"\">>"LOGFILE
+  # log resultaat in $LOG_FILE 
+  system(logline)
+}' $FILE
+# Einde awk
+
+echo "`date` Einde ververking van bestand $FILE_NAME">>$LOG_FILE
